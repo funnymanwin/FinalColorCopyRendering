@@ -9,17 +9,16 @@ public class CameraFinalColorCopyRendererFeature : ScriptableRendererFeature
     class CustomRenderPass : ScriptableRenderPass
     {
         string _passName = "FinalColorCopy pass";
-        Material _blitMaterial;
         int _shaderTextureProperty;
-        bool _generateMips;
         RTHandle _destination;
+        Settings _settings;
 
         class PassData
         {
             internal TextureHandle copySourceTexture;
         }
 
-        static void ExecutePass(PassData data, RasterGraphContext context)
+        static void ExecutePass(PassData data, RasterGraphContext context, RTHandle rtHandle)
         {
             // Records a rendering command to copy, or blit, the contents of the source texture
             // to the color render target of the render pass.
@@ -29,12 +28,11 @@ public class CameraFinalColorCopyRendererFeature : ScriptableRendererFeature
                 new Vector4(1, 1, 0, 0), 0, false);
         }
 
-        public void Setup(Material mat, int shaderTextureProperty, RTHandle destinationTexture, bool generateMips)
+        public void Setup(Settings settings, RTHandle destinationTexture)
         {
-            _blitMaterial = mat;
-            _shaderTextureProperty = shaderTextureProperty;
+            _settings = settings;
+            _shaderTextureProperty = Shader.PropertyToID(settings.ShaderTextureProperty);
             _destination = destinationTexture;
-            _generateMips = generateMips;
             requiresIntermediateTexture = true;
         }
 
@@ -42,13 +40,16 @@ public class CameraFinalColorCopyRendererFeature : ScriptableRendererFeature
         // FrameData is a context container through which URP resources can be accessed and managed.
         public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
         {
-            if(!_blitMaterial)
+            if(!_settings.BlitMaterial)
                 return;
 
             var resourceData = frameData.Get<UniversalResourceData>();
             UniversalCameraData cameraData = frameData.Get<UniversalCameraData>();
 
-            if(cameraData.renderType == CameraRenderType.Base)// || !cameraData.camera.gameObject.CompareTag("MainCamera"))
+            if(cameraData.renderType == CameraRenderType.Base && _settings.ExcludeBaseCamera)// || !cameraData.camera.gameObject.CompareTag("MainCamera"))
+                return;
+            
+            if(cameraData.renderType == CameraRenderType.Overlay && _settings.ExcludeOverlayCamera)
                 return;
 
             if(resourceData.isActiveTargetBackBuffer)
@@ -69,12 +70,12 @@ public class CameraFinalColorCopyRendererFeature : ScriptableRendererFeature
                 //desc.depthBufferBits = 0;
 
                 TextureHandle destinationImported = renderGraph.ImportTexture(_destination);
-
+                
                 builder.UseTexture(passData.copySourceTexture);
                 builder.SetRenderAttachment(destinationImported, 0);
 
                 builder.SetRenderFunc((PassData data, RasterGraphContext context)
-                    => ExecutePass(data, context));
+                    => ExecutePass(data, context, _destination));
                 
                 // ------- Set a texture to the global texture (No need because it's already set in Create() method):
                 //builder.SetGlobalTextureAfterPass(destinationImported, _shaderTextureProperty);
@@ -87,12 +88,20 @@ public class CameraFinalColorCopyRendererFeature : ScriptableRendererFeature
         }
     }
 
-    
-    public RenderPassEvent injectionPoint = RenderPassEvent.AfterRenderingTransparents;
-    public Material material;
-    public bool GenerateMipMaps;
-    public string ShaderTextureProperty = "_CameraFinalColorCopy";
+    [System.Serializable]
+    public class Settings
+    {
+        public RenderPassEvent injectionPoint = RenderPassEvent.AfterRenderingTransparents;
+        public Material BlitMaterial;
+        public bool GenerateMipMaps;
+        public bool ExcludeBaseCamera;
+        public bool ExcludeOverlayCamera;
+        public string ShaderTextureProperty = "_CameraFinalColorCopy";
+    }
 
+
+    public Settings FeatureSettings;
+    
     [Header("Procedurally created RenderTexture:")]
     public RenderTexture RenderTextureInspector;
 
@@ -109,14 +118,14 @@ public class CameraFinalColorCopyRendererFeature : ScriptableRendererFeature
         // Configures where the render pass should be injected.
         _renderTextureHandle = null;
         RenderTextureDescriptor textureProperties = new RenderTextureDescriptor(Screen.width, Screen.height, RenderTextureFormat.Default, 0);
-        textureProperties.useMipMap = GenerateMipMaps;
-        textureProperties.autoGenerateMips = true;
+        textureProperties.useMipMap = FeatureSettings.GenerateMipMaps;
+        textureProperties.autoGenerateMips = FeatureSettings.GenerateMipMaps;
         if(textureProperties.width < 10 || textureProperties.height < 10)
             return;
         
         RenderingUtils.ReAllocateHandleIfNeeded(ref _renderTextureHandle, textureProperties, FilterMode.Bilinear, TextureWrapMode.Clamp, name: $"CameraColor-{name}");
-        Shader.SetGlobalTexture(ShaderTextureProperty, _renderTextureHandle);
-        _scriptablePass.renderPassEvent = injectionPoint;
+        Shader.SetGlobalTexture(FeatureSettings.ShaderTextureProperty, _renderTextureHandle);
+        _scriptablePass.renderPassEvent = FeatureSettings.injectionPoint;
         RenderTextureInspector = _renderTextureHandle.rt;
     }
 
@@ -124,7 +133,7 @@ public class CameraFinalColorCopyRendererFeature : ScriptableRendererFeature
     // This method is called when setting up the renderer once per-camera.
     public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
     {
-        _scriptablePass.Setup(material, Shader.PropertyToID(ShaderTextureProperty), _renderTextureHandle, GenerateMipMaps);
+        _scriptablePass.Setup(FeatureSettings, _renderTextureHandle);
         renderer.EnqueuePass(_scriptablePass);
     }
 
